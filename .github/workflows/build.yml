@@ -1,0 +1,76 @@
+name: Build
+
+on: [push, pull_request]
+
+jobs:
+  build-windows:
+    name: Build Windows
+    runs-on: windows-2025
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Build
+        run: |
+          cargo build --release
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: save-migrator-windows
+          path: target/release/save-migrator.exe
+
+  build-macos:
+    name: Build MacOS
+    runs-on: macos-15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Build
+        run: |
+          cargo build --release
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: save-migrator-macos-aarch64
+          path: target/release/save-migrator
+
+  build-intel-macos:
+    name: Build MacOS (Intel)
+    runs-on: macos-15-intel
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Build
+        run: |
+          cargo build --release
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: save-migrator-macos-x86_64
+          path: target/release/save-migrator
+
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Build
+        run: |
+          cargo build --release
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: save-migrator-linux
+          path: target/release/save-migrator
