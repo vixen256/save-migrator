@@ -2,6 +2,7 @@ use crossterm::event::*;
 use ratatui::layout::*;
 use ratatui::style::*;
 use ratatui::widgets::*;
+use std::collections::BTreeMap;
 use std::io::Read;
 
 fn main() {
@@ -389,7 +390,7 @@ fn convert_save(in_folder: &str, out_folder: &str) {
 }
 
 fn read_savefile(dir: &str, filename: &str) -> Option<Vec<u8>> {
-	let key = generate_key(filename, get_steam_userid()?);
+	let key = generate_key(filename, get_steam_userid().ok()?);
 	let (filename, extension) = filename.split_at(filename.rfind('.').unwrap());
 	let filename =
 		openssl::hash::hash(openssl::hash::MessageDigest::md5(), filename.as_bytes()).ok()?;
@@ -429,7 +430,7 @@ fn save_savefile(dir: &str, filename: &str, data: &[u8]) -> Option<()> {
 	let mut compressed = Vec::new();
 	encoder.read_to_end(&mut compressed).ok()?;
 
-	let key = generate_key(filename, get_steam_userid()?);
+	let key = generate_key(filename, get_steam_userid().ok()?);
 
 	let encrypted = openssl::symm::encrypt(
 		openssl::symm::Cipher::aes_128_cbc(),
@@ -485,25 +486,53 @@ fn generate_key(input: &str, steam_id: u64) -> [u8; 16] {
 	out
 }
 
-fn get_steam_userid() -> Option<u64> {
+fn get_steam_userid() -> Result<u64, String> {
 	let steam_folder = get_steam_folder()?;
-	let data = std::fs::read_to_string(format!("{steam_folder}/config/loginusers.vdf")).ok()?;
-	let users = keyvalues_parser::Vdf::parse(&data).ok()?;
+	let path = format!("{steam_folder}/config/loginusers.vdf");
+	let data = std::fs::read_to_string(&path).map_err(|e| format!("Could not read {path}: {e}"))?;
+	let users =
+		keyvalues_parser::Vdf::parse(&data).map_err(|e| format!("Could not read {path}: {e}"))?;
 
-	users.value.get_obj()?.0.iter().find_map(|(id, user)| {
-		if user
-			.first()?
-			.get_obj()?
-			.get("MostRecent")?
-			.first()?
-			.get_str()?
-			== "1"
-		{
-			id.parse::<u64>().ok()
-		} else {
-			None
-		}
-	})
+	users
+		.value
+		.get_obj()
+		.map_or(Err(String::from("Could not find user")), |r| Ok(r))?
+		.0
+		.iter()
+		.filter_map(|(id, user)| {
+			if let Ok(id) = id.parse::<u64>()
+				&& let Some(user) = user.first()
+				&& let Some(obj) = user.get_obj()
+			{
+				if obj.contains_key("timestamp")
+					&& let Some(timestamp) = obj.get("timestamp")
+					&& let Some(timestamp) = timestamp.first()
+					&& let Some(timestamp) = timestamp.get_str()
+					&& let Ok(timestamp) = timestamp.parse::<u64>()
+				{
+					Some((timestamp, id))
+				} else if obj.contains_key("Timestamp")
+					&& let Some(timestamp) = obj.get("Timestamp")
+					&& let Some(timestamp) = timestamp.first()
+					&& let Some(timestamp) = timestamp.get_str()
+					&& let Ok(timestamp) = timestamp.parse::<u64>()
+				{
+					Some((timestamp, id))
+				} else {
+					None
+				}
+			} else {
+				None
+			}
+		})
+		.collect::<BTreeMap<_, _>>()
+		.last_key_value()
+		.map_or(
+			Err(String::from(
+				"Could not get most recent user from loginusers.vdf",
+			)),
+			|(_, user)| Ok(*user),
+		)
 }
 
 #[derive(Debug)]
@@ -513,34 +542,46 @@ struct SaveFolders {
 	eden: Option<String>,
 }
 
-fn get_save_folders() -> Option<SaveFolders> {
+fn get_save_folders() -> Result<SaveFolders, String> {
 	let user_id = get_steam_userid()?;
 
 	#[cfg(target_os = "windows")]
 	let dir = {
-		let dir = dirs::config_dir()?;
+		let dir =
+			dirs::config_dir().map_or(Err(String::from("Could not find config_dir")), |r| Ok(r))?;
 		dir.to_string_lossy().to_string()
 	};
 	#[cfg(not(target_os = "windows"))]
 	let dir = {
 		let steam_folder = get_steam_folder()?;
-		let data =
-			std::fs::read_to_string(format!("{steam_folder}/config/libraryfolders.vdf")).ok()?;
-		let libraries = keyvalues_parser::Vdf::parse(&data).ok()?;
+		let data = std::fs::read_to_string(format!("{steam_folder}/config/libraryfolders.vdf"))
+			.map_err(|e| format!("Could not read libraryfolders.vdf: {e}"))?;
+		let libraries = keyvalues_parser::Vdf::parse(&data)
+			.map_err(|e| format!("Could not read libraryfolders.vdf: {e}"))?;
 
 		let dir = libraries
 			.value
-			.get_obj()?
+			.get_obj()
+			.map_or(Err(String::from("Could not find library")), |r| Ok(r))?
 			.0
 			.iter()
 			.find_map(|(_, library)| {
-				if library
-					.first()?
-					.get_obj()?
-					.get("apps")?
-					.first()?
-					.get_obj()?
-					.contains_key("1761390")
+				if std::fs::exists(
+					library
+						.first()?
+						.get_obj()?
+						.get("path")?
+						.first()?
+						.get_str()?,
+				)
+				.is_ok_and(|exists| exists)
+					&& library
+						.first()?
+						.get_obj()?
+						.get("apps")?
+						.first()?
+						.get_obj()?
+						.contains_key("1761390")
 				{
 					Some(
 						library
@@ -553,6 +594,9 @@ fn get_save_folders() -> Option<SaveFolders> {
 				} else {
 					None
 				}
+			})
+			.map_or(Err(String::from("Could not find library with MM+")), |r| {
+				Ok(r)
 			})?;
 		format!("{dir}/steamapps/compatdata/1761390/pfx/drive_c/users/steamuser/AppData/Roaming")
 	};
@@ -571,48 +615,60 @@ fn get_save_folders() -> Option<SaveFolders> {
 	if std::path::Path::new(&format!("{dir}/EDEN")).exists() {
 		folders.eden = Some(format!("{dir}/EDEN/Project DIVA MEGA39's/Steam/{user_id}/"));
 	}
-	Some(folders)
+	Ok(folders)
 }
 
 // From R4D
-fn get_steam_folder() -> Option<String> {
+fn get_steam_folder() -> Result<String, String> {
 	#[cfg(target_os = "linux")]
 	{
-		let mut binding = dirs::home_dir()?;
+		let mut binding =
+			dirs::home_dir().map_or(Err(String::from("Could not find $HOME")), |r| Ok(r))?;
 		binding.push(".local/share/Steam");
 		if !binding.exists() {
-			binding = dirs::home_dir()?;
+			binding =
+				dirs::home_dir().map_or(Err(String::from("Could not find $HOME")), |r| Ok(r))?;
 			binding.push(".var/app/com.valvesoftware.Steam/data/Steam");
 			if !binding.exists() {
-				return None;
+				return Err(String::from(
+					"Could not find $HOME/.local/share/Steam OR $HOME/.var/app/com.valvesoftware.Steam/data/Steam",
+				));
 			}
 		}
-		Some(binding.display().to_string())
+		Ok(binding.display().to_string())
 	}
 	#[cfg(target_os = "macos")]
 	{
-		let mut binding = dirs::home_dir()?;
+		let mut binding =
+			dirs::home_dir().map_or(Err(String::from("Could not find $HOME")), |r| Ok(r))?;
 		binding.push("Library/Application Support/Steam");
 		if !binding.exists() {
-			return None;
+			return Err(String::from(
+				"Could not find $HOME/Library/Application Support/Steam",
+			));
 		}
-		Some(binding.display().to_string())
+		Ok(binding.display().to_string())
 	}
 	#[cfg(target_os = "windows")]
 	{
 		let hklm = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE);
 		let steam_key = hklm
 			.open_subkey(r#"SOFTWARE\WOW6432Node\Valve\Steam"#)
-			.ok()?;
+			.map_err(|e| {
+				format!(
+					"Could not open registrey entry SOFTWARE/WOW6432Node/Valve/Steam {}",
+					e.to_string()
+				)
+			})?;
 		let res: std::io::Result<String> = steam_key.get_value("InstallPath");
 		if let Ok(path) = res {
 			if std::path::PathBuf::from(path.clone()).exists() {
-				return Some(path.clone());
+				return Ok(path.clone());
 			} else {
-				return Some(r#"C:\Program Files (x86)\Steam"#.to_string());
+				return Ok(r#"C:\Program Files (x86)\Steam"#.to_string());
 			}
 		} else {
-			return Some(r#"C:\Program Files (x86)\Steam"#.to_string());
+			return Ok(r#"C:\Program Files (x86)\Steam"#.to_string());
 		}
 	}
 }
